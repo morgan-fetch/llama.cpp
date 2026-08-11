@@ -1335,6 +1335,13 @@ common_init_result_ptr common_init_from_params(common_params & params) {
         common_set_adapter_lora(lctx, params.lora_adapters);
     }
 
+    // FATE expert caching for MoE offloading
+    if (params.fate_enabled) {
+        if (llama_fate_init(lctx, params.fate_cache_mb, params.fate_shallow, params.fate_predictor)) {
+            LOG_INF("%s: FATE expert caching enabled\n", __func__);
+        }
+    }
+
     if (params.warmup) {
         LOG_WRN("%s: warming up the model with an empty run - please wait ... (--no-warmup to disable)\n", __func__);
 

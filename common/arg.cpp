@@ -2320,6 +2320,37 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_N_CPU_MOE_DRAFT"));
+    add_opt(common_arg(
+        {"--fate"},
+        "enable FATE expert caching for MoE offloading (skip redundant PCIe copies)",
+        [](common_params & params) {
+            params.fate_enabled = true;
+            if (params.tensor_buft_overrides.empty()) {
+                params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
+            }
+        }
+    ).set_env("LLAMA_ARG_FATE"));
+    add_opt(common_arg(
+        {"--fate-cache"}, "N",
+        string_format("FATE expert cache size in MB (default: 0 = auto ~4GB)"),
+        [](common_params & params, int value) {
+            params.fate_cache_mb = value;
+        }
+    ).set_env("LLAMA_ARG_FATE_CACHE"));
+    add_opt(common_arg(
+        {"--fate-shallow"}, "N",
+        string_format("FATE shallow-pinned layers 0..N-1 (default: -1 = auto)"),
+        [](common_params & params, int value) {
+            params.fate_shallow = value;
+        }
+    ).set_env("LLAMA_ARG_FATE_SHALLOW"));
+    add_opt(common_arg(
+        {"--no-fate-predictor"},
+        "disable FATE cross-layer expert prediction",
+        [](common_params & params) {
+            params.fate_predictor = false;
+        }
+    ).set_env("LLAMA_ARG_NO_FATE_PREDICTOR"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
