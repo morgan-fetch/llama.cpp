@@ -644,7 +644,7 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
-    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
+    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyDefault, cudaStreamPerThread));
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 }
 
@@ -2851,7 +2851,7 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
 
     GGML_ASSERT(buf->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && "unsupported buffer type");
 
-    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
+    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyDefault, cuda_ctx->stream()));
 }
 
 static void ggml_backend_cuda_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
@@ -5312,5 +5312,99 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 
     return cuda_backend;
 }
+
+// ---------------------------------------------------------------------------
+// FATE prefetch — separate CUDA stream for async expert prefetching
+// ---------------------------------------------------------------------------
+extern "C" {
+
+void * fate_prefetch_stream_create(void) {
+    cudaStream_t s = nullptr;
+    cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+    if (err != cudaSuccess) return nullptr;
+    return (void *)s;
+}
+
+void fate_prefetch_h2d(void * stream, void * dst, const void * src, size_t n) {
+    if (!stream || !dst || !src || n == 0) return;
+    cudaMemcpyAsync(dst, src, n, cudaMemcpyDefault, (cudaStream_t)stream);
+}
+
+void fate_prefetch_sync(void * stream) {
+    if (!stream) return;
+    cudaStreamSynchronize((cudaStream_t)stream);
+}
+
+void fate_prefetch_stream_destroy(void * stream) {
+    if (!stream) return;
+    cudaStreamDestroy((cudaStream_t)stream);
+}
+
+static cudaEvent_t g_fate_barrier_event = nullptr;
+
+// Make backend's main CUDA stream wait for the prefetch stream (GPU-side only)
+void fate_prefetch_insert_barrier(void * backend_ptr, void * prefetch_stream) {
+    if (!backend_ptr || !prefetch_stream) return;
+    if (!g_fate_barrier_event) {
+        cudaEventCreateWithFlags(&g_fate_barrier_event, cudaEventDisableTiming);
+    }
+    ggml_backend_cuda_context * ctx =
+        (ggml_backend_cuda_context *)((ggml_backend_t)backend_ptr)->context;
+    cudaEventRecord(g_fate_barrier_event, (cudaStream_t)prefetch_stream);
+    cudaStreamWaitEvent(ctx->stream(), g_fate_barrier_event, 0);
+}
+
+// Debug: synchronous D2H copy for verification
+void fate_debug_d2h(void * dst, const void * src, size_t n) {
+    if (!dst || !src || n == 0) return;
+    cudaDeviceSynchronize();
+    cudaMemcpy(dst, src, n, cudaMemcpyDeviceToHost);
+}
+
+// Debug: check if pointer is device or host
+int fate_debug_ptr_type(const void * ptr) {
+    cudaPointerAttributes attrs;
+    cudaError_t err = cudaPointerGetAttributes(&attrs, ptr);
+    if (err != cudaSuccess) { cudaGetLastError(); return -1; }
+    // 0=unregistered, 1=host, 2=device, 3=managed
+    return (int)attrs.type;
+}
+
+// Pin host memory so cudaMemcpyAsync is truly non-blocking.
+bool fate_prefetch_pin_memory(const void * ptr, size_t size) {
+    if (!ptr || size == 0) return false;
+    const size_t page_size = 4096;
+    uintptr_t start = (uintptr_t)ptr;
+    uintptr_t aligned_start = start & ~(page_size - 1);
+    size_t aligned_size = (start + size - aligned_start + page_size - 1) & ~(page_size - 1);
+    // Try several flags in order of preference
+    const unsigned int flags[] = { cudaHostRegisterDefault, cudaHostRegisterPortable, cudaHostRegisterMapped };
+    for (auto f : flags) {
+        cudaError_t err = cudaHostRegister((void *)aligned_start, aligned_size, f);
+        if (err == cudaSuccess) return true;
+        cudaGetLastError();
+    }
+    static int log_count = 0;
+    if (log_count < 1) {
+        fprintf(stderr, "FATE: cudaHostRegister failed for all flags (ptr=%p size=%zuMB)\n",
+                ptr, size / (1024*1024));
+        log_count++;
+    }
+    return false;
+}
+
+// Allocate a pinned staging buffer
+void * fate_prefetch_alloc_pinned(size_t size) {
+    void * p = nullptr;
+    cudaError_t err = cudaMallocHost(&p, size);
+    if (err != cudaSuccess) { cudaGetLastError(); return nullptr; }
+    return p;
+}
+
+void fate_prefetch_free_pinned(void * p) {
+    if (p) cudaFreeHost(p);
+}
+
+} // extern "C"
 
 GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
