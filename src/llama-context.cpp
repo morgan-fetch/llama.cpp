@@ -5,6 +5,7 @@
 #include "llama-graph.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
+#include "llama-fate.h"
 #include "llama-io.h"
 #include "llama-memory.h"
 #include "llama-mmap.h"
@@ -3716,6 +3717,38 @@ void llama_set_warmup(llama_context * ctx, bool warmup) {
     ctx->set_warmup(warmup);
 }
 
+bool llama_fate_init(llama_context * ctx, int32_t cache_mb, int32_t /*shallow_layers*/, bool /*predictor*/) {
+    if (!ctx) return false;
+
+    const auto & model = ctx->get_model();
+    if (model.hparams.n_expert == 0) return false;
+
+    ggml_backend_t gpu = nullptr;
+    const int nb = ggml_backend_sched_get_n_backends(ctx->get_sched());
+    for (int i = 0; i < nb - 1; i++) {
+        gpu = ggml_backend_sched_get_backend(ctx->get_sched(), i);
+        break;
+    }
+    if (!gpu) return false;
+
+    static fate_system instance;
+    if (!instance.init(model, gpu, cache_mb)) return false;
+    g_fate = &instance;
+
+    ggml_backend_sched_set_expert_hook(ctx->get_sched(),
+        [](void * ud, ggml_backend_t be, ggml_tensor * dst,
+           const void * src, size_t off, size_t sz,
+           int32_t eid, int64_t ne, const char * name) -> bool {
+            return ((fate_system *)ud)->on_expert_copy(be, dst, src, off, sz, eid, ne, name);
+        },
+        g_fate);
+    return true;
+}
+
+void llama_fate_print_stats(void) {
+    if (g_fate) g_fate->print_stats();
+}
+
 void llama_synchronize(llama_context * ctx) {
     ctx->synchronize();
 }
@@ -4153,6 +4186,7 @@ void llama_perf_context_print(const llama_context * ctx) {
             __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
     LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
     LLAMA_LOG_INFO("%s:    graphs reused = %10d\n", __func__, data.n_reused);
+    llama_fate_print_stats();
 }
 
 void llama_perf_context_reset(llama_context * ctx) {

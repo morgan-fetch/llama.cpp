@@ -62,6 +62,8 @@
 #define cudaGetErrorString musaGetErrorString
 #define cudaGetLastError musaGetLastError
 #define cudaHostRegister musaHostRegister
+#define cudaHostRegisterDefault musaHostRegisterDefault
+#define cudaHostRegisterMapped musaHostRegisterMapped
 #define cudaHostRegisterPortable musaHostRegisterPortable
 #define cudaHostRegisterReadOnly musaHostRegisterReadOnly
 #define cudaHostUnregister musaHostUnregister
@@ -77,11 +79,14 @@
 #define cudaMemcpyDeviceToDevice musaMemcpyDeviceToDevice
 #define cudaMemcpyDeviceToHost musaMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice musaMemcpyHostToDevice
+#define cudaMemcpyDefault musaMemcpyDefault
 #define cudaMemcpyKind musaMemcpyKind
 #define cudaMemset musaMemset
 #define cudaMemsetAsync musaMemsetAsync
 #define cudaMemGetInfo musaMemGetInfo
 #define cudaOccupancyMaxPotentialBlockSize musaOccupancyMaxPotentialBlockSize
+#define cudaPointerAttributes musaPointerAttributes
+#define cudaPointerGetAttributes musaPointerGetAttributes
 #define cudaSetDevice musaSetDevice
 #define cudaStreamCreateWithFlags musaStreamCreateWithFlags
 #define cudaStreamDestroy musaStreamDestroy

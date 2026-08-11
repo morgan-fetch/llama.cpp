@@ -481,6 +481,12 @@ struct common_params {
     ggml_backend_sched_eval_callback cb_eval = nullptr;
     void * cb_eval_user_data                 = nullptr;
 
+    // FATE expert caching for MoE offloading (config stored in globals, see llama-fate.h)
+    bool    fate_enabled       = false;
+    int32_t fate_cache_mb      = 0;
+    int32_t fate_shallow       = -1;
+    bool    fate_predictor     = true;
+
     ggml_numa_strategy numa = GGML_NUMA_STRATEGY_DISABLED;
 
     enum llama_rope_scaling_type rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED;

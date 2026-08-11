@@ -1005,6 +1005,15 @@ extern "C" {
     DEPRECATED(LLAMA_API void llama_set_warmup(struct llama_context * ctx, bool warmup),
             "user code should do warmup runs manually [TAG_LLAMA_GRAPH_NO_WARMUP]");
 
+    // FATE: enable expert caching for MoE offloading
+    // cache_mb: GPU cache size in MB (0 = auto ~4GB)
+    // shallow_layers: layers 0..N-1 pinned on GPU (-1 = auto)
+    // predictor: enable cross-layer expert prediction
+    LLAMA_API bool llama_fate_init(struct llama_context * ctx, int32_t cache_mb, int32_t shallow_layers, bool predictor);
+
+    // FATE: print cache stats
+    LLAMA_API void llama_fate_print_stats(void);
+
     // Set abort callback
     LLAMA_API void llama_set_abort_callback(struct llama_context * ctx, ggml_abort_callback abort_callback, void * abort_callback_data);
 
