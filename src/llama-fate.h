@@ -58,7 +58,11 @@ struct fate_gpu_pool {
     bool     init(ggml_backend_t backend, size_t slot_bytes, size_t target_mb);
     void     free_pool();
     int32_t  find_or_alloc(uint64_t key);
+    int32_t  find_free_alloc(uint64_t key);
     void *   slot_device_ptr(uint32_t idx);
+
+private:
+    int32_t  alloc_slot(uint64_t key, bool allow_evict);
 
     static uint64_t make_key(uint32_t layer, uint32_t kind, uint32_t expert) {
         return ((uint64_t)layer << 16) | ((uint64_t)kind << 8) | expert;
@@ -75,10 +79,12 @@ struct fate_gpu_pool {
 // ---------------------------------------------------------------------------
 struct fate_prefetcher {
     static const uint32_t N_KINDS = 4;
+    static const uint32_t N_STAGE = 16;
 
     void * stream = nullptr;
-    void * staging = nullptr;     // pinned staging buffer for async H2D
-    size_t staging_size = 0;
+    void * stage[N_STAGE] = {};        // ring of pinned staging buffers for async H2D
+    void * stage_stream[N_STAGE] = {}; // one CUDA stream per staging slot
+    size_t stage_size = 0;
 
     std::thread           worker;
     std::mutex            mtx;

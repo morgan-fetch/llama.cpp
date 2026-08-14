@@ -77,6 +77,14 @@ void fate_gpu_pool::free_pool() {
 }
 
 int32_t fate_gpu_pool::find_or_alloc(uint64_t key) {
+    return alloc_slot(key, true);
+}
+
+int32_t fate_gpu_pool::find_free_alloc(uint64_t key) {
+    return alloc_slot(key, false);
+}
+
+int32_t fate_gpu_pool::alloc_slot(uint64_t key, bool allow_evict) {
     auto it = key_to_slot.find(key);
     if (it != key_to_slot.end()) {
         slots[it->second].last_used = ++tick;
@@ -87,7 +95,7 @@ int32_t fate_gpu_pool::find_or_alloc(uint64_t key) {
     uint64_t oldest = UINT64_MAX;
     for (uint32_t i = 0; i < n_slots; i++) {
         if (slots[i].key == UINT64_MAX) { best = (int32_t)i; break; }
-        if (slots[i].last_used < oldest) { oldest = slots[i].last_used; best = (int32_t)i; }
+        if (allow_evict && slots[i].last_used < oldest) { oldest = slots[i].last_used; best = (int32_t)i; }
     }
     if (best < 0) return -1;
 
@@ -123,13 +131,18 @@ void fate_prefetcher::init(uint32_t nl, uint32_t ne, uint32_t neu, size_t max_ex
         return;
     }
 
-    // Allocate pinned staging buffer (one expert + padding)
-    staging_size = max_expert_bytes + 512;
-    staging = fate_prefetch_alloc_pinned(staging_size);
-    if (staging) {
-        fprintf(stderr, "FATE: pinned staging buffer: %.1fMB\n",
-                (float)staging_size / (1024*1024));
+    // Allocate a ring of pinned staging buffers (one expert + padding each),
+    // one CUDA stream per slot. A single buffer reused for several async
+    // copies is a data race: cudaMemcpyAsync from pinned memory reads the
+    // buffer after the API returns, so overwriting it with the next expert's
+    // data corrupts every copy still in flight.
+    stage_size = max_expert_bytes + 512;
+    for (uint32_t i = 0; i < N_STAGE; i++) {
+        stage[i] = fate_prefetch_alloc_pinned(stage_size);
+        stage_stream[i] = fate_prefetch_stream_create();
     }
+    fprintf(stderr, "FATE: pinned staging ring: %u × %.1fMB\n",
+            N_STAGE, (float)stage_size / (1024*1024));
 
     quit = false;
     worker = std::thread([this]{ worker_fn(); });
@@ -250,7 +263,18 @@ void fate_prefetcher::shutdown() {
     fate_prefetch_sync(stream);
     fate_prefetch_stream_destroy(stream);
     stream = nullptr;
-    if (staging) { fate_prefetch_free_pinned(staging); staging = nullptr; }
+    for (uint32_t i = 0; i < N_STAGE; i++) {
+        if (stage_stream[i]) {
+            fate_prefetch_sync(stage_stream[i]);
+            fate_prefetch_stream_destroy(stage_stream[i]);
+            stage_stream[i] = nullptr;
+        }
+        if (stage[i]) {
+            fate_prefetch_free_pinned(stage[i]);
+            stage[i] = nullptr;
+        }
+    }
+    stage_size = 0;
 }
 
 // ===========================================================================
@@ -397,7 +421,11 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
                         if (idx >= prefetch.sources.size() || !prefetch.sources[idx].base) continue;
                         uint64_t key = fate_gpu_pool::make_key(next_l, k, (uint32_t)eid);
                         if (pool.key_to_slot.count(key)) continue;
-                        int32_t slot = pool.find_or_alloc(key);
+                        // Prefetch only into free slots: evicting for a mere
+                        // prediction churns the pool and discards experts that
+                        // are about to be used. Real usage (miss path) may
+                        // still evict via find_or_alloc.
+                        int32_t slot = pool.find_free_alloc(key);
                         if (slot < 0) continue;
                         void * dst_ptr = pool.slot_device_ptr((uint32_t)slot);
                         const void * src = (const char *)prefetch.sources[idx].base
@@ -405,9 +433,16 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
                         size_t copy_n = ((uint32_t)eid < n_expert - 1)
                                       ? prefetch.sources[idx].padded_bytes
                                       : prefetch.sources[idx].expert_bytes;
-                        if (prefetch.staging && copy_n <= prefetch.staging_size) {
-                            memcpy(prefetch.staging, src, copy_n);
-                            fate_prefetch_h2d(prefetch.stream, dst_ptr, prefetch.staging, copy_n);
+                        // Ring of staging buffers: sync the slot's stream before
+                        // reusing it so the previous async copy from this buffer
+                        // has fully completed (no data race). With N_STAGE slots
+                        // the per-copy sync is normally free — the previous DMA
+                        // on this slot finished several copies ago.
+                        const uint32_t s = (uint32_t)(prefetch.prefetched % fate_prefetcher::N_STAGE);
+                        if (prefetch.stage[s] && prefetch.stage_stream[s]) {
+                            fate_prefetch_sync(prefetch.stage_stream[s]);
+                            memcpy(prefetch.stage[s], src, copy_n);
+                            fate_prefetch_h2d(prefetch.stage_stream[s], dst_ptr, prefetch.stage[s], copy_n);
                         } else {
                             fate_prefetch_h2d(prefetch.stream, dst_ptr, src, copy_n);
                         }
@@ -415,7 +450,12 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
                     }
                 }
             }
-            fate_prefetch_insert_barrier((void *)backend, prefetch.stream);
+            // Make the main compute stream wait for all staging streams.
+            for (uint32_t s = 0; s < fate_prefetcher::N_STAGE; s++) {
+                if (prefetch.stage_stream[s]) {
+                    fate_prefetch_insert_barrier((void *)backend, prefetch.stage_stream[s]);
+                }
+            }
         }
 
         if (layer < prefetch.last_layer || prefetch.last_layer < 0) {
