@@ -61,12 +61,12 @@ struct fate_gpu_pool {
     int32_t  find_free_alloc(uint64_t key);
     void *   slot_device_ptr(uint32_t idx);
 
-private:
-    int32_t  alloc_slot(uint64_t key, bool allow_evict);
-
     static uint64_t make_key(uint32_t layer, uint32_t kind, uint32_t expert) {
         return ((uint64_t)layer << 16) | ((uint64_t)kind << 8) | expert;
     }
+
+private:
+    int32_t  alloc_slot(uint64_t key, bool allow_evict);
 };
 
 // ---------------------------------------------------------------------------
