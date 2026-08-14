@@ -58,6 +58,14 @@
             inputsFrom = [ config.packages.cuda ];
             shellHook = ''
               echo "Entering llama.cpp CUDA devShell"
+              # CMake links against the CUDA toolkit's stub libcuda
+              # (cuda_cudart/lib/stubs), which the loader picks up from the
+              # binary RUNPATH at runtime and fails with "CUDA driver is a
+              # stub library". Prepend the real driver lib directory so the
+              # actual libcuda.so.1 is loaded first.
+              if [ -d /run/opengl-driver/lib ]; then
+                export LD_LIBRARY_PATH="/run/opengl-driver/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              fi
             '';
           };
         };
