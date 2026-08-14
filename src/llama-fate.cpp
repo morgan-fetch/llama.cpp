@@ -285,7 +285,7 @@ bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_
     gpu_backend = backend;
 
     const auto & hp = model.hparams;
-    n_layer       = hp.n_layer;
+    n_layer       = hp.n_layer();
     n_expert      = hp.n_expert;
     n_expert_used = hp.n_expert_used;
 
