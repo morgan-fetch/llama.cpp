@@ -308,6 +308,12 @@ int fate_system::parse_tensor_kind(const char * name) {
 bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_t cache_mb) {
     gpu_backend = backend;
 
+    // re-init (e.g. model reload in the same process): tear down the previous
+    // state first so pinned memory and the VRAM pool don't leak
+    if (initialized) {
+        shutdown();
+    }
+
     const auto & hp = model.hparams;
     n_layer       = hp.n_layer();
     n_expert      = hp.n_expert;
@@ -352,18 +358,30 @@ bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_
     }
 
     // Pin expert weight memory for truly async H2D prefetch
-    uint32_t pinned = 0;
+    uint32_t n_pinned = 0;
     for (uint32_t il = 0; il < n_layer && il < (uint32_t)model.layers.size(); il++) {
         const auto & lay = model.layers[il];
-        if (lay.ffn_gate_exps && lay.ffn_gate_exps->data)
-            pinned += fate_prefetch_pin_memory(lay.ffn_gate_exps->data, ggml_nbytes(lay.ffn_gate_exps));
-        if (lay.ffn_up_exps && lay.ffn_up_exps->data)
-            pinned += fate_prefetch_pin_memory(lay.ffn_up_exps->data, ggml_nbytes(lay.ffn_up_exps));
-        if (lay.ffn_down_exps && lay.ffn_down_exps->data)
-            pinned += fate_prefetch_pin_memory(lay.ffn_down_exps->data, ggml_nbytes(lay.ffn_down_exps));
+        if (lay.ffn_gate_exps && lay.ffn_gate_exps->data) {
+            if (fate_prefetch_pin_memory(lay.ffn_gate_exps->data, ggml_nbytes(lay.ffn_gate_exps))) {
+                pinned_regions.emplace_back(lay.ffn_gate_exps->data, ggml_nbytes(lay.ffn_gate_exps));
+                n_pinned++;
+            }
+        }
+        if (lay.ffn_up_exps && lay.ffn_up_exps->data) {
+            if (fate_prefetch_pin_memory(lay.ffn_up_exps->data, ggml_nbytes(lay.ffn_up_exps))) {
+                pinned_regions.emplace_back(lay.ffn_up_exps->data, ggml_nbytes(lay.ffn_up_exps));
+                n_pinned++;
+            }
+        }
+        if (lay.ffn_down_exps && lay.ffn_down_exps->data) {
+            if (fate_prefetch_pin_memory(lay.ffn_down_exps->data, ggml_nbytes(lay.ffn_down_exps))) {
+                pinned_regions.emplace_back(lay.ffn_down_exps->data, ggml_nbytes(lay.ffn_down_exps));
+                n_pinned++;
+            }
+        }
     }
     fprintf(stderr, "FATE: pinned %u/%u expert tensors for async prefetch\n",
-            pinned, n_layer * 3);
+            n_pinned, n_layer * 3);
 
     // Init prefetcher with CPU source pointers for every expert tensor.
     // Use nb[2] as the per-expert stride (matches the scheduler's expert_size).
@@ -379,12 +397,25 @@ bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_
     }
 
     fprintf(stderr, "FATE: system initialized (%u cache slots + prefetch)\n", pool.n_slots);
+    initialized = true;
     return true;
 }
 
 void fate_system::shutdown() {
+    if (!initialized) return;
+
+    // stop the prefetch worker and drain all CUDA streams first, so no async
+    // H2D copies are still reading the host memory we're about to unpin
     prefetch.shutdown();
+
+    // release the cudaHostRegister pins on the expert weight tensors
+    for (const auto & pr : pinned_regions) {
+        fate_prefetch_unpin_memory(pr.first, pr.second);
+    }
+    pinned_regions.clear();
+
     pool.free_pool();
+    initialized = false;
 }
 
 // ===========================================================================

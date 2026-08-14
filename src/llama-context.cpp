@@ -3643,6 +3643,13 @@ llama_context * llama_new_context_with_model(
 }
 
 void llama_free(llama_context * ctx) {
+    // FATE: tear down the prefetch worker and unpin expert memory before the
+    // context (and its scheduler expert hook) dies — otherwise the
+    // cudaHostRegister pins accumulate across context frees / model reloads
+    if (g_fate && g_fate->initialized) {
+        g_fate->shutdown();
+        g_fate = nullptr;
+    }
     delete ctx;
 }
 

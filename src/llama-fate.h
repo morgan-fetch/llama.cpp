@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 struct llama_model;
@@ -31,6 +32,7 @@ extern "C" {
     void   fate_prefetch_stream_destroy(void * stream);
     void   fate_prefetch_insert_barrier(void * backend_ptr, void * prefetch_stream);
     bool   fate_prefetch_pin_memory(const void * ptr, size_t size);
+    void   fate_prefetch_unpin_memory(const void * ptr, size_t size);
     void * fate_prefetch_alloc_pinned(size_t size);
     void   fate_prefetch_free_pinned(void * p);
     void   fate_debug_d2h(void * dst, const void * src, size_t n);
@@ -145,6 +147,11 @@ struct fate_system {
         std::atomic<uint64_t> hits{0};
         std::atomic<uint64_t> misses{0};
     } stats;
+
+    // host memory regions pinned with cudaHostRegister during init (ptr, size);
+    // unpinned in shutdown() so reloads don't accumulate pins
+    std::vector<std::pair<const void *, size_t>> pinned_regions;
+    bool initialized = false;
 
     bool init(const llama_model & model, ggml_backend_t backend, int32_t cache_mb = 0);
     void shutdown();

@@ -5610,6 +5610,26 @@ bool fate_prefetch_pin_memory(const void * ptr, size_t size) {
     return false;
 }
 
+// Unpin host memory previously pinned by fate_prefetch_pin_memory.
+// cudaHostUnregister must receive the same aligned base pointer that
+// cudaHostRegister saw, so recompute it from the original ptr.
+void fate_prefetch_unpin_memory(const void * ptr, size_t size) {
+    if (!ptr || size == 0) return;
+    const size_t page_size = 4096;
+    uintptr_t start = (uintptr_t)ptr;
+    uintptr_t aligned_start = start & ~(page_size - 1);
+    cudaError_t err = cudaHostUnregister((void *)aligned_start);
+    if (err != cudaSuccess) {
+        static int log_count = 0;
+        if (log_count < 1) {
+            fprintf(stderr, "FATE: cudaHostUnregister failed (ptr=%p err=%d: %s)\n",
+                    ptr, (int)err, cudaGetErrorString(err));
+            log_count++;
+        }
+        cudaGetLastError();
+    }
+}
+
 // Allocate a pinned staging buffer
 void * fate_prefetch_alloc_pinned(size_t size) {
     void * p = nullptr;
