@@ -115,6 +115,7 @@ struct fate_prefetcher {
     std::vector<tensor_src> sources;
 
     std::atomic<uint64_t> prefetched{0};
+    std::atomic<uint64_t> barrier_skips{0}; // transitions where no prefetch copies were issued -> barrier omitted
 
     void init(uint32_t nl, uint32_t ne, uint32_t neu, size_t max_expert_bytes);
     void register_src(uint32_t layer, uint32_t kind, const void * base, size_t eb);

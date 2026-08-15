@@ -440,6 +440,7 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
         if (prefetch.last_layer >= 0 && prefetch.stream) {
             uint32_t prev_l = (uint32_t)prefetch.last_layer;
             uint32_t next_l = (uint32_t)layer;
+            bool did_prefetch = false;
             if (next_l < n_layer) {
                 std::unordered_set<int32_t> predicted;
                 for (int32_t e : prefetch.cur[prev_l]) predicted.insert(e);
@@ -452,12 +453,18 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
                         if (idx >= prefetch.sources.size() || !prefetch.sources[idx].base) continue;
                         uint64_t key = fate_gpu_pool::make_key(next_l, k, (uint32_t)eid);
                         if (pool.key_to_slot.count(key)) continue;
-                        // Prefetch only into free slots: evicting for a mere
-                        // prediction churns the pool and discards experts that
-                        // are about to be used. Real usage (miss path) may
-                        // still evict via find_or_alloc.
-                        int32_t slot = pool.find_free_alloc(key);
+                        // Prefetch with eviction: during prefill the miss path
+                        // fills every slot (each expert it touches gets one), so
+                        // find_free_alloc finds nothing, prediction never copies,
+                        // and the engine is dead weight — prefill stays H2D-bound
+                        // with the barrier tax on top. Evicting LRU for a
+                        // prediction turns the pool into a lookahead ring: the
+                        // next layer's experts land ahead of the compute stream
+                        // and prefill becomes mostly D2D hits. Mispredictions age
+                        // out by LRU and get re-fetched on the miss path.
+                        int32_t slot = pool.find_or_alloc(key);
                         if (slot < 0) continue;
+                        did_prefetch = true;
                         void * dst_ptr = pool.slot_device_ptr((uint32_t)slot);
                         const void * src = (const char *)prefetch.sources[idx].base
                                            + (size_t)eid * prefetch.sources[idx].expert_bytes;
@@ -481,11 +488,22 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
                     }
                 }
             }
-            // Make the main compute stream wait for all staging streams.
-            for (uint32_t s = 0; s < fate_prefetcher::N_STAGE; s++) {
-                if (prefetch.stage_stream[s]) {
-                    fate_prefetch_insert_barrier((void *)backend, prefetch.stage_stream[s]);
+            // Make the main compute stream wait for the staging streams —
+            // but only when we actually issued prefetch copies. The barrier
+            // exists to order staging-stream pool writes against compute;
+            // with nothing written it is pure sync tax (16 events + stream
+            // waits per layer transition, every token of prefill). It must
+            // NOT be skipped when copies were issued: it is also what keeps
+            // earlier main-stream pool reads ahead of the prefetch
+            // overwrites, so skipping it then would be a data race.
+            if (did_prefetch) {
+                for (uint32_t s = 0; s < fate_prefetcher::N_STAGE; s++) {
+                    if (prefetch.stage_stream[s]) {
+                        fate_prefetch_insert_barrier((void *)backend, prefetch.stage_stream[s]);
+                    }
                 }
+            } else {
+                prefetch.barrier_skips++;
             }
         }
 
@@ -541,9 +559,11 @@ void fate_system::print_stats() const {
                     "  misses     : %llu (H2D fallback)\n"
                     "  hit rate   : %.2f%%\n"
                     "  prefetched : %llu (async H2D to pool)\n"
+                    "  bar. skips : %llu (barriers omitted, no prefetch work)\n"
                     "  pool       : %u slots × %.1fMB\n"
                     "==================================\n\n",
             (unsigned long long)a, (unsigned long long)h,
             (unsigned long long)m, hr, (unsigned long long)p,
+            (unsigned long long)prefetch.barrier_skips.load(),
             pool.n_slots, (float)pool.slot_bytes / (1024*1024));
 }
